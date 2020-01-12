@@ -5,22 +5,21 @@
  */
 
 #include <logging/log.h>
-LOG_MODULE_REGISTER(net_coap_client_sample, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(drivers_coap, LOG_LEVEL_DBG);
 
 #include <errno.h>
 #include <sys/printk.h>
 #include <sys/byteorder.h>
 #include <zephyr.h>
-
+#include "net_private.h"
+#include "kernel.h"
 #include <net/socket.h>
 #include <net/net_mgmt.h>
 #include <net/net_ip.h>
 #include <net/udp.h>
 #include <net/coap.h>
 
-#include "net_private.h"
-#include "coap_client.h"
-#include "kernel.h"
+#include "drivers/coap_client.h"
 
 #define PEER_PORT 5683
 #define CONFIG_NET_CONFIG_PEER_IPV6_ADDR "fdde:ad11:11de:0:ce30:a933:976a:af68"
@@ -265,11 +264,11 @@ int send_simple_coap_msgs_and_wait_for_reply(void)
             return 0;
         }
 
-        // r = process_simple_coap_reply();
-        // if (r < 0)
-        // {
-        //     return r;
-        // }
+        r = process_simple_coap_reply();
+        if (r < 0)
+        {
+            return r;
+        }
 
         test_type++;
     }
@@ -673,47 +672,75 @@ static int register_observer(void)
     return 0;
 }
 
-// void main(void)
-// {
-//     int r;
+int coap_send(u8_t method, u8_t *payload)
+{
+    // u8_t payload[] = "payload";
+    struct coap_packet request;
+    const char *const *p;
+    u8_t *data;
+    int r;
 
-//     LOG_DBG("Start CoAP-client sample");
-//     r = start_coap_client();
-//     if (r < 0)
-//     {
-//         goto quit;
-//     }
+    data = (u8_t *)k_malloc(MAX_COAP_MSG_LEN);
+    if (!data)
+    {
+        return -ENOMEM;
+    }
 
-//     /* GET, PUT, POST, DELETE */
-//     r = send_simple_coap_msgs_and_wait_for_reply();
-//     if (r < 0)
-//     {
-//         goto quit;
-//     }
+    r = coap_packet_init(&request, data, MAX_COAP_MSG_LEN,
+                         1, COAP_TYPE_CON, 8, coap_next_token(),
+                         method, coap_next_id());
+    if (r < 0)
+    {
+        LOG_ERR("Failed to init CoAP message");
+        goto end;
+    }
 
-//     /* Block-wise transfer */
-//     r = get_large_coap_msgs();
-//     if (r < 0)
-//     {
-//         goto quit;
-//     }
+    for (p = test_path; p && *p; p++)
+    {
+        r = coap_packet_append_option(&request, COAP_OPTION_URI_PATH,
+                                      *p, strlen(*p));
+        if (r < 0)
+        {
+            LOG_ERR("Unable add option to request");
+            goto end;
+        }
+    }
 
-//     /* Register observer, get notifications and unregister */
-//     r = register_observer();
-//     if (r < 0)
-//     {
-//         goto quit;
-//     }
+    switch (method)
+    {
+    case COAP_METHOD_GET:
+    case COAP_METHOD_DELETE:
+        break;
 
-//     /* Close the socket */
-//     (void)close(sock);
+    case COAP_METHOD_PUT:
+    case COAP_METHOD_POST:
+        r = coap_packet_append_payload_marker(&request);
+        if (r < 0)
+        {
+            LOG_ERR("Unable to append payload marker");
+            goto end;
+        }
 
-//     LOG_DBG("Done");
+        r = coap_packet_append_payload(&request, (u8_t *)payload,
+                                       sizeof(payload) - 1);
+        if (r < 0)
+        {
+            LOG_ERR("Not able to append payload");
+            goto end;
+        }
 
-//     return;
+        break;
+    default:
+        r = -EINVAL;
+        goto end;
+    }
 
-// quit:
-//     (void)close(sock);
+    net_hexdump("Request", request.data, request.offset);
 
-//     LOG_ERR("quit");
-// }
+    r = send(sock, request.data, request.offset, 0);
+
+end:
+    k_free(data);
+
+    return 0;
+}
